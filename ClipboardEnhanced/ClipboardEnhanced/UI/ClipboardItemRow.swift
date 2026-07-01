@@ -5,6 +5,7 @@
 //  Affichage d'un élément dans la liste.
 //
 
+import AppKit
 import SwiftUI
 
 struct ClipboardItemRow: View {
@@ -17,10 +18,9 @@ struct ClipboardItemRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: item.type.symbolName)
-                .frame(width: 16)
-                .foregroundStyle(.secondary)
-                .padding(.top, 2)
+            leadingVisual
+                .frame(width: 32, height: 32)
+                .padding(.top, 1)
 
             VStack(alignment: .leading, spacing: 2) {
                 // Texte : 3 lignes max, troncature « … » au-delà.
@@ -62,5 +62,19 @@ struct ClipboardItemRow: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onCopy)
         .onHover { isHovered = $0 }
+    }
+
+    /// Vignette (image/fichier) si disponible, sinon le symbole du type.
+    @ViewBuilder
+    private var leadingVisual: some View {
+        if let data = item.thumbnailData, let image = NSImage(data: data) {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+        } else {
+            Image(systemName: item.type.symbolName)
+                .foregroundStyle(.secondary)
+        }
     }
 }

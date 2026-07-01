@@ -39,17 +39,21 @@ cliquer recopie ; la recherche filtre.
 
 ---
 
-## Phase 2 — Persistance SQLite (GRDB)
+## Phase 2 — Persistance SQLite (brut, sans dépendance) ✅
 **But :** l'historique survit au redémarrage.
 
-- [ ] `DatabaseManager` : ouverture DB dans `Application Support/ClipboardHistory/`, migrations.
-- [ ] Schéma : table `clipboard_item` (id, type, content, preview, createdAt, lastCopiedAt, isPinned).
-- [ ] `ClipboardRepository` : insert, fetchAll (tri épinglés puis date), delete.
-- [ ] **Dédoublonnage** : si contenu identique existe → update `lastCopiedAt` au lieu d'insérer.
-- [ ] Brancher `ClipboardMonitor` → `ClipboardRepository`.
-- [ ] Le panneau lit la base (observation réactive via GRDB `ValueObservation`).
+- [x] `Database` / `Statement` : wrapper maison sur `SQLite3` système (WAL, `user_version`).
+- [x] Schéma `clipboard_item` complet **dès maintenant** (colonnes image/fichier incluses
+      → pas de migration en phase 5) + index unique `content_hash` + index `last_copied_at`.
+- [x] `ClipboardRepository` : insert / fetchAll (épinglés puis date) / touch / setPinned / delete.
+- [x] **Dédoublonnage** décidé côté store (mémoire ↔ base cohérentes via `id` partagé) ;
+      empreinte SHA-256 (CryptoKit) en garde-fou côté base.
+- [x] Limite texte ~1 Mo appliquée à l'ingestion.
+- [x] Mode dégradé mémoire seule si la base ne s'ouvre pas (l'app ne crashe jamais).
+- [x] Build vérifié → **BUILD SUCCEEDED**.
 
 **Validation :** copier, quitter, relancer → l'historique est toujours là.
+Base dans `~/Library/Containers/com.bde.ClipboardEnhanced/Data/Library/Application Support/ClipboardEnhanced/history.sqlite` (sandbox).
 
 ---
 
@@ -78,33 +82,63 @@ cliquer recopie ; la recherche filtre.
 
 ---
 
-## Phase 5 — Types riches : URL, image, fichier
+## Phase 5 — Types riches : URL, image, fichier ✅
 **But :** supporter tout le contenu, pas seulement le texte. **Dossiers exclus.**
 
-- [ ] Détection du type depuis les `NSPasteboard.PasteboardType` disponibles.
-- [ ] **URL** : reconnue, affichage dédié (favicon optionnel plus tard).
-- [ ] **Image** : stocker la donnée complète (BLOB ≤ ~10 Mo, sinon ignoré) + thumbnail ~300 px.
-- [ ] **Fichier** : security-scoped bookmark + chemin + icône système.
-      **Ignorer les répertoires** (vérifier `isDirectory`).
-- [ ] Entitlement `com.apple.security.files.bookmarks.app-scope` (réinjection après redémarrage).
-- [ ] Limite texte : ignorer les contenus > ~1 Mo.
-- [ ] Rendu adapté par type dans `ClipboardItemRow`.
-- [ ] `PasteboardWriter` sait réécrire chaque type correctement.
+- [x] `PasteboardReader` : détection par UTI, priorité fichier → image → URL → texte.
+- [x] **URL** : reconnue (http/https), type dédié.
+- [x] **Image** : PNG normalisé (BLOB ≤ 10 Mo, sinon ignoré) + vignette ~300 px ;
+      **chargement paresseux** de la donnée pleine (mémoire légère).
+- [x] **Fichier** : chemin + nom + icône système comme vignette ; **dossiers ignorés** (`isDirectory`).
+- [x] `PasteboardWriter` : réécrit image (NSImage) / fichier (fileURL) / texte selon le type.
+- [x] `ClipboardItemRow` : vignette image/icône fichier, sinon symbole du type.
+- [x] Limite texte ~1 Mo (déjà en place).
+- [x] Garde confidentialité minimal : contenus *concealed*/*transient* non capturés (mode privé complet → phase 7).
+- [x] **Libellé image intelligent** : OCR local (Vision, asynchrone) → sinon `alt` HTML → sinon
+      nom/domaine de l'URL source → sinon « Image · L × H ». Rend les captures d'écran cherchables.
+- [x] Build vérifié → **BUILD SUCCEEDED**.
 
-**Validation :** copier une image / un fichier / une URL → rendu correct + recollage correct ;
-copier un dossier → non historisé ; image énorme → ignorée.
+**Décision** : pas de security-scoped bookmark ni d'entitlement. Re-coller un fichier n'écrit que
+son URL ; c'est l'app réceptrice qui accède au fichier avec ses droits. Les bookmarks ne seraient
+utiles que pour *lire le contenu* du fichier (inutile ici).
+
+**Validation :** copier image / fichier / URL → rendu + recollage corrects ;
+copier un dossier → non historisé ; image > 10 Mo → ignorée ; copie depuis gestionnaire de mots de passe → ignorée.
 
 ---
 
-## Phase 6 — Épinglage, suppression, rétention
+## Phase 6 — Épinglage, suppression, rétention ✅
 **But :** gérer le contenu dans le temps.
 
-- [ ] Épingler/dépingler (les épinglés ignorent la purge et restent en haut).
-- [ ] Supprimer un item (bouton au survol).
-- [ ] `RetentionService` : purge périodique selon durée (1–7 j) ET nombre (≤200).
-- [ ] Suppression des BLOBs/fichiers orphelins associés.
+- [x] Épingler/dépingler (déjà en place ; les épinglés ignorent la purge et restent en haut).
+- [x] Supprimer un item (bouton au survol, déjà en place).
+- [x] `AppSettings` (UserDefaults) : `retentionDays` (1–7), `maxItems` (≤200).
+- [x] `ClipboardRepository.purge(olderThan:keepingNewest:)` : par âge ET par nombre, épinglés exemptés.
+- [x] Application : au lancement, après chaque ajout (limite de nombre), et via timer 120 s (âge).
+- [x] Pas de fichiers orphelins : images = BLOB dans la même ligne, fichiers = références → un `DELETE` suffit.
+- [x] Build vérifié → **BUILD SUCCEEDED**.
 
-**Validation :** dépasser la limite → les vieux non-épinglés disparaissent ; les épinglés restent.
+**Validation :** dépasser 200 → les vieux non-épinglés disparaissent ; les épinglés restent.
+(UI de réglage des valeurs : phase 8 ; pour l'instant défauts 7 j / 200.)
+
+---
+
+## Phase 6bis — Recherche sémantique (hybride, on-device) 🔜
+**But :** retrouver un élément par le sens, pas seulement par sous-chaîne. 100 % local, gratuit.
+
+- [ ] `EmbeddingService` autour de **`NLContextualEmbedding`** (framework Natural Language) :
+      chargement asynchrone des assets par script, vecteur d'une chaîne, indisponibilité gérée.
+- [ ] Migration schéma v2 : colonne `embedding` (BLOB = vecteur `Float`).
+- [ ] À l'insertion d'un **texte/URL** (et libellé image / nom fichier) : calculer + stocker le vecteur.
+- [ ] Backfill des éléments existants au premier lancement post-mise-à-jour.
+- [ ] Recherche **hybride** : correspondances littérales priorisées, complétées par similarité cosinus
+      (force brute sur ≤ 200 éléments, instantané). Fallback littéral si modèle non chargé.
+- [ ] Seuil de similarité pour éviter le bruit.
+
+**Limite assumée** : sémantique sur le **texte** uniquement. Pas d'API Apple texte→image (pas de CLIP) ;
+images/fichiers cherchables par libellé/nom seulement.
+
+**Validation :** copier « rendez-vous demain 14h » puis chercher « réunion » → l'élément remonte.
 
 ---
 

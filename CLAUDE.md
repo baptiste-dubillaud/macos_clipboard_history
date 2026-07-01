@@ -13,11 +13,13 @@ Au clic, elle affiche l'historique copier/coller (texte, URL, image, fichier) av
 | Langage        | Swift 5.9+                             | Natif, performant |
 | UI             | SwiftUI + `MenuBarExtra` (`.window`)  | Vue riche dans la barre de menus (macOS 13+) |
 | Cible          | macOS 13 Ventura minimum               | `MenuBarExtra` requiert 13+ |
-| Persistance    | SQLite via **GRDB.swift**              | Léger, typé, requêtes rapides, FTS pour la recherche |
-| Raccourcis     | **KeyboardShortcuts** (S. Sorhus)      | Hotkeys globaux configurables, standard de facto |
-| Build          | Xcode + Swift Package Manager          | Dépendances via SPM |
+| Persistance    | **SQLite brut** (lib système `SQLite3`) | Zéro dépendance externe ; wrapper maison `Database`/`Statement` |
+| Hash/dédup     | **CryptoKit** (SHA-256)                | Framework système, empreinte de contenu |
+| Raccourcis     | **KeyboardShortcuts** (S. Sorhus)      | Hotkeys globaux configurables (phase 7) |
+| Build          | Xcode + Swift Package Manager          | — |
 
-Dépendances SPM : `GRDB.swift`, `KeyboardShortcuts`.
+Dépendances externes : **aucune pour le cœur** (SQLite + CryptoKit sont système).
+`KeyboardShortcuts` sera ajouté en phase 7 pour les raccourcis globaux.
 
 ---
 

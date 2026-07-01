@@ -18,8 +18,8 @@ import AppKit
 @MainActor
 final class ClipboardMonitor {
 
-    /// Appelé quand du texte (ou une URL sous forme de texte) vient d'être copié.
-    var onNewText: ((String) -> Void)?
+    /// Appelé quand le presse-papier change (le contenu est lu par le store).
+    var onChange: (() -> Void)?
 
     private let pasteboard: NSPasteboard
     private let pollInterval: TimeInterval
@@ -52,12 +52,6 @@ final class ClipboardMonitor {
         let current = pasteboard.changeCount
         guard current != lastChangeCount else { return }
         lastChangeCount = current
-
-        // Phase 1 : on ne traite que le texte.
-        if let string = pasteboard.string(forType: .string) {
-            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return }
-            onNewText?(string)
-        }
+        onChange?()
     }
 }
