@@ -123,22 +123,24 @@ copier un dossier → non historisé ; image > 10 Mo → ignorée ; copie depuis
 
 ---
 
-## Phase 6bis — Recherche sémantique (hybride, on-device) 🔜
+## Phase 6bis — Recherche sémantique (hybride, on-device) ✅
 **But :** retrouver un élément par le sens, pas seulement par sous-chaîne. 100 % local, gratuit.
 
-- [ ] `EmbeddingService` autour de **`NLContextualEmbedding`** (framework Natural Language) :
-      chargement asynchrone des assets par script, vecteur d'une chaîne, indisponibilité gérée.
-- [ ] Migration schéma v2 : colonne `embedding` (BLOB = vecteur `Float`).
-- [ ] À l'insertion d'un **texte/URL** (et libellé image / nom fichier) : calculer + stocker le vecteur.
-- [ ] Backfill des éléments existants au premier lancement post-mise-à-jour.
-- [ ] Recherche **hybride** : correspondances littérales priorisées, complétées par similarité cosinus
-      (force brute sur ≤ 200 éléments, instantané). Fallback littéral si modèle non chargé.
-- [ ] Seuil de similarité pour éviter le bruit.
+- [x] `EmbeddingService` autour de **`NLContextualEmbedding`** (script latin, fr/en) :
+      `prepare()` async (chargement des assets), `vector(for:)` = moyenne des vecteurs de tokens.
+- [x] `VectorMath` : sérialisation BLOB ⟷ `[Float]` + similarité cosinus.
+- [x] Migration schéma v2 : colonne `embedding` (BLOB).
+- [x] Vecteur calculé à l'insertion (tous types) + **recalcul après OCR** ; backfill au chargement du modèle.
+- [x] Recherche **hybride** : littérales d'abord, puis sémantiques (cosinus ≥ 0.30, top 25),
+      force brute sur ≤ 200 éléments. Requête vectorisée en cache (recalcul à chaque frappe).
+- [x] Fallback littéral tant que le modèle n'est pas prêt (dégradation propre, un seul espace vectoriel).
+- [x] Build vérifié → **BUILD SUCCEEDED**.
 
-**Limite assumée** : sémantique sur le **texte** uniquement. Pas d'API Apple texte→image (pas de CLIP) ;
-images/fichiers cherchables par libellé/nom seulement.
+**Limite assumée** : sémantique sur le **texte** uniquement (y compris texte OCR des images).
+Pas d'API Apple texte→image (pas de CLIP).
 
 **Validation :** copier « rendez-vous demain 14h » puis chercher « réunion » → l'élément remonte.
+(NB : au 1ᵉʳ lancement, le modèle peut mettre quelques secondes à se charger → recherche littérale en attendant.)
 
 ---
 

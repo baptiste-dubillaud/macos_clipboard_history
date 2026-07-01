@@ -31,6 +31,9 @@ struct ClipboardItem: Identifiable {
     /// Chemin du fichier (type `.file`).
     var filePath: String?
 
+    /// Vecteur sémantique du texte (recherche sémantique). `nil` si non calculé.
+    var embedding: [Float]?
+
     /// Empreinte stable du contenu, pour le dédoublonnage.
     let contentHash: String
 
@@ -44,6 +47,7 @@ struct ClipboardItem: Identifiable {
         imageData: Data? = nil,
         thumbnailData: Data? = nil,
         filePath: String? = nil,
+        embedding: [Float]? = nil,
         contentHash: String
     ) {
         self.id = id
@@ -55,6 +59,7 @@ struct ClipboardItem: Identifiable {
         self.imageData = imageData
         self.thumbnailData = thumbnailData
         self.filePath = filePath
+        self.embedding = embedding
         self.contentHash = contentHash
     }
 

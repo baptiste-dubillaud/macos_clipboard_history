@@ -40,7 +40,9 @@ final class ClipboardRepository {
     // MARK: - Migrations
 
     private func migrate() throws {
-        if try db.userVersion() < 1 {
+        var version = try db.userVersion()
+
+        if version < 1 {
             try db.execute("""
                 CREATE TABLE IF NOT EXISTS clipboard_item (
                     id             TEXT PRIMARY KEY,
@@ -63,6 +65,14 @@ final class ClipboardRepository {
                 "CREATE INDEX IF NOT EXISTS idx_last_copied ON clipboard_item(last_copied_at);"
             )
             try db.setUserVersion(1)
+            version = 1
+        }
+
+        // v2 : recherche sémantique (vecteur d'embedding).
+        if version < 2 {
+            try db.execute("ALTER TABLE clipboard_item ADD COLUMN embedding BLOB;")
+            try db.setUserVersion(2)
+            version = 2
         }
     }
 
@@ -74,13 +84,14 @@ final class ClipboardRepository {
     /// seules les vignettes le sont. La donnée pleine se charge via `imageData(id:)`.
     func fetchAll() throws -> [ClipboardItem] {
         let statement = try db.prepare("""
-            SELECT id, type, text, thumbnail, file_path, created_at, last_copied_at, is_pinned, content_hash
+            SELECT id, type, text, thumbnail, file_path, created_at, last_copied_at, is_pinned, content_hash, embedding
             FROM clipboard_item
             ORDER BY is_pinned DESC, last_copied_at DESC;
         """)
         var items: [ClipboardItem] = []
         while try statement.step() {
             let path = statement.string(4)
+            let embeddingData = statement.blob(9)
             items.append(ClipboardItem(
                 id: UUID(uuidString: statement.string(0)) ?? UUID(),
                 type: ClipboardItemType(rawValue: statement.string(1)) ?? .text,
@@ -91,6 +102,7 @@ final class ClipboardRepository {
                 imageData: nil,
                 thumbnailData: statement.blob(3),
                 filePath: path.isEmpty ? nil : path,
+                embedding: embeddingData.map { VectorMath.vector(from: $0) },
                 contentHash: statement.string(8)
             ))
         }
@@ -141,6 +153,13 @@ final class ClipboardRepository {
     func updateText(id: UUID, text: String) throws {
         let statement = try db.prepare("UPDATE clipboard_item SET text = ? WHERE id = ?;")
         statement.bind(1, text).bind(2, id.uuidString)
+        try statement.step()
+    }
+
+    /// Stocke le vecteur d'embedding d'un élément.
+    func updateEmbedding(id: UUID, vector: [Float]) throws {
+        let statement = try db.prepare("UPDATE clipboard_item SET embedding = ? WHERE id = ?;")
+        statement.bind(1, VectorMath.data(from: vector)).bind(2, id.uuidString)
         try statement.step()
     }
 

@@ -18,7 +18,9 @@ import Combine
 final class ClipboardStore: ObservableObject {
 
     @Published private(set) var items: [ClipboardItem] = []
-    @Published var searchQuery: String = ""
+    @Published var searchQuery: String = "" {
+        didSet { recomputeQueryVector() }
+    }
 
     let settings: AppSettings
 
@@ -26,6 +28,15 @@ final class ClipboardStore: ObservableObject {
     private let repository: ClipboardRepository?
     private let reader: PasteboardReader
     private let writer: PasteboardWriter
+    private let embeddingService: EmbeddingService
+
+    /// Vecteur de la requête courante (recalculé quand `searchQuery` change).
+    private var queryVector: [Float]?
+
+    /// Seuil de similarité cosinus pour retenir un résultat sémantique.
+    private static let semanticThreshold: Float = 0.30
+    /// Nombre max de résultats sémantiques ajoutés aux correspondances littérales.
+    private static let maxSemanticResults = 25
 
     /// Évite de ré-ingérer notre propre écriture lorsqu'on recopie un élément.
     private var suppressNextCapture = false
@@ -42,12 +53,14 @@ final class ClipboardStore: ObservableObject {
         repository: ClipboardRepository? = nil,
         reader: PasteboardReader? = nil,
         writer: PasteboardWriter? = nil,
-        settings: AppSettings? = nil
+        settings: AppSettings? = nil,
+        embeddingService: EmbeddingService? = nil
     ) {
         self.monitor = monitor ?? ClipboardMonitor()
         self.reader = reader ?? PasteboardReader()
         self.writer = writer ?? PasteboardWriter()
         self.settings = settings ?? AppSettings()
+        self.embeddingService = embeddingService ?? EmbeddingService()
 
         if let repository {
             self.repository = repository
@@ -74,12 +87,22 @@ final class ClipboardStore: ObservableObject {
         retentionTimer = Timer.scheduledTimer(withTimeInterval: Self.retentionInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.applyRetention() }
         }
+
+        // Charge le modèle d'embedding (asynchrone), puis calcule les vecteurs manquants.
+        Task { [weak self] in
+            await self?.embeddingService.prepare()
+            self?.backfillEmbeddings()
+        }
     }
 
     // MARK: - Lecture
 
     /// Historique trié (épinglés d'abord, puis du plus récent au plus ancien),
-    /// filtré par la recherche courante.
+    /// filtré par la recherche.
+    ///
+    /// Recherche **hybride** : d'abord les correspondances littérales (sous-chaîne),
+    /// puis, si le modèle est prêt, les résultats sémantiques les plus proches
+    /// (similarité cosinus au-dessus du seuil), triés par pertinence.
     var visibleItems: [ClipboardItem] {
         let sorted = items.sorted { lhs, rhs in
             if lhs.isPinned != rhs.isPinned { return lhs.isPinned }
@@ -87,7 +110,24 @@ final class ClipboardStore: ObservableObject {
         }
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return sorted }
-        return sorted.filter { $0.text.localizedCaseInsensitiveContains(query) }
+
+        let literal = sorted.filter { $0.text.localizedCaseInsensitiveContains(query) }
+
+        guard embeddingService.isReady, let queryVector else { return literal }
+
+        let literalIDs = Set(literal.map(\.id))
+        let semantic = items
+            .filter { !literalIDs.contains($0.id) }
+            .compactMap { item -> (item: ClipboardItem, score: Float)? in
+                guard let embedding = item.embedding else { return nil }
+                let score = VectorMath.cosineSimilarity(queryVector, embedding)
+                return score >= Self.semanticThreshold ? (item, score) : nil
+            }
+            .sorted { $0.score > $1.score }
+            .prefix(Self.maxSemanticResults)
+            .map(\.item)
+
+        return literal + semantic
     }
 
     // MARK: - Capture
@@ -121,6 +161,9 @@ final class ClipboardStore: ObservableObject {
         // Applique immédiatement la limite de nombre après un nouvel ajout.
         applyRetention()
 
+        // Calcule le vecteur sémantique du nouvel élément (si le modèle est prêt).
+        computeEmbedding(id: item.id, force: false)
+
         // OCR asynchrone : remplace le libellé de repli si du texte est détecté.
         if captured.type == .image, let png = captured.imageData {
             recognizeImageText(itemID: item.id, pngData: png)
@@ -143,6 +186,36 @@ final class ClipboardStore: ObservableObject {
             items[index].text = text
         }
         persist { try $0.updateText(id: id, text: text) }
+        // Le texte a changé (OCR) : recalcule le vecteur sémantique.
+        computeEmbedding(id: id, force: true)
+    }
+
+    // MARK: - Embeddings
+
+    /// Calcule et stocke le vecteur d'un élément. `force` recalcule même si un
+    /// vecteur existe déjà (ex. après OCR). No-op si le modèle n'est pas prêt.
+    private func computeEmbedding(id: UUID, force: Bool) {
+        guard embeddingService.isReady,
+              let index = items.firstIndex(where: { $0.id == id }) else { return }
+        if !force, items[index].embedding != nil { return }
+
+        guard let vector = embeddingService.vector(for: items[index].text) else { return }
+        items[index].embedding = vector
+        persist { try $0.updateEmbedding(id: id, vector: vector) }
+    }
+
+    /// Calcule les vecteurs manquants (au chargement du modèle).
+    private func backfillEmbeddings() {
+        guard embeddingService.isReady else { return }
+        for item in items where item.embedding == nil {
+            computeEmbedding(id: item.id, force: false)
+        }
+        recomputeQueryVector()
+    }
+
+    private func recomputeQueryVector() {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        queryVector = query.isEmpty ? nil : embeddingService.vector(for: query)
     }
 
     // MARK: - Actions
