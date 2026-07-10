@@ -10,6 +10,9 @@ import SwiftUI
 struct MenuPanelView: View {
     @ObservedObject var store: ClipboardStore
 
+    /// Délai laissant voir le badge « Copié » avant que le panneau ne se referme.
+    private static let copyFeedbackDuration: Duration = .milliseconds(400)
+
     var body: some View {
         VStack(spacing: 0) {
             searchBar
@@ -23,6 +26,26 @@ struct MenuPanelView: View {
             footer
         }
         .frame(width: 340, height: 440)
+        .onAppear { store.clearCopyFeedback() }
+    }
+
+    // MARK: - Actions
+
+    /// Recopie l'élément, montre brièvement « Copié », puis referme le panneau.
+    private func copy(_ item: ClipboardItem) {
+        withAnimation(.easeOut(duration: 0.12)) {
+            store.copyToPasteboard(item)
+        }
+        Task {
+            try? await Task.sleep(for: Self.copyFeedbackDuration)
+            dismissPanel()
+        }
+    }
+
+    /// `@Environment(\.dismiss)` est sans effet sur le panneau d'un `MenuBarExtra`
+    /// en style `.window` : il faut fermer le `NSPanel` sous-jacent.
+    private func dismissPanel() {
+        NSApp.keyWindow?.close()
     }
 
     private var pausedBanner: some View {
@@ -70,7 +93,8 @@ struct MenuPanelView: View {
                     ForEach(items) { item in
                         ClipboardItemRow(
                             item: item,
-                            onCopy: { store.copyToPasteboard(item) },
+                            isRecentlyCopied: store.recentlyCopiedID == item.id,
+                            onCopy: { copy(item) },
                             onTogglePin: { store.togglePin(item) },
                             onDelete: { store.delete(item) }
                         )

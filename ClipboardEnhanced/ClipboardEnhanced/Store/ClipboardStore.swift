@@ -19,12 +19,16 @@ final class ClipboardStore: ObservableObject {
 
     @Published private(set) var items: [ClipboardItem] = []
     @Published var searchQuery: String = "" {
-        didSet { recomputeQueryVector() }
+        didSet { scheduleQueryVectorRecompute() }
     }
 
     /// Mode privé manuel : quand `true`, rien n'est capturé (les copies faites
     /// pendant la pause ne sont pas historisées). Non persisté : reprise au lancement.
     @Published var isCapturePaused = false
+
+    /// Élément qui vient d'être recopié : la ligne affiche « Copié » le temps que
+    /// le panneau se referme. Remis à `nil` à la réouverture du panneau.
+    @Published private(set) var recentlyCopiedID: UUID?
 
     let settings: AppSettings
 
@@ -34,13 +38,23 @@ final class ClipboardStore: ObservableObject {
     private let writer: PasteboardWriter
     private let embeddingService: EmbeddingService
 
-    /// Vecteur de la requête courante (recalculé quand `searchQuery` change).
-    private var queryVector: [Float]?
+    /// Vecteur de la requête courante. `@Published` : sa mise à jour différée (debounce)
+    /// doit rafraîchir la liste, alors que `searchQuery` a déjà cessé de changer.
+    @Published private var queryVector: [Float]?
+
+    /// Recalcul différé du vecteur de requête (annulé à chaque frappe).
+    private var queryVectorTask: Task<Void, Never>?
 
     /// Seuil de similarité cosinus pour retenir un résultat sémantique.
-    private static let semanticThreshold: Float = 0.30
+    /// Volontairement strict : en dessous, des éléments sans rapport remontent.
+    private static let semanticThreshold: Float = 0.50
     /// Nombre max de résultats sémantiques ajoutés aux correspondances littérales.
-    private static let maxSemanticResults = 25
+    private static let maxSemanticResults = 5
+    /// En deçà, une requête est trop courte pour porter du sens : littéral seulement.
+    private static let minSemanticQueryLength = 3
+    /// Délai d'inactivité avant de recalculer le vecteur : évite que l'ordre des
+    /// résultats sémantiques change à chaque caractère tapé.
+    private static let queryDebounce: Duration = .milliseconds(250)
 
     /// Évite de ré-ingérer notre propre écriture lorsqu'on recopie un élément.
     private var suppressNextCapture = false
@@ -105,8 +119,11 @@ final class ClipboardStore: ObservableObject {
     /// filtré par la recherche.
     ///
     /// Recherche **hybride** : d'abord les correspondances littérales (sous-chaîne),
-    /// puis, si le modèle est prêt, les résultats sémantiques les plus proches
-    /// (similarité cosinus au-dessus du seuil), triés par pertinence.
+    /// puis, si le modèle est prêt, au plus `maxSemanticResults` voisins sémantiques
+    /// au-dessus de `semanticThreshold`, triés par pertinence.
+    ///
+    /// Le bloc littéral est toujours en tête et se met à jour à chaque frappe ; le bloc
+    /// sémantique dépend de `queryVector`, recalculé en différé (cf. `scheduleQueryVectorRecompute`).
     var visibleItems: [ClipboardItem] {
         let sorted = items.sorted { lhs, rhs in
             if lhs.isPinned != rhs.isPinned { return lhs.isPinned }
@@ -219,9 +236,34 @@ final class ClipboardStore: ObservableObject {
         recomputeQueryVector()
     }
 
+    /// Programme le recalcul du vecteur après une courte inactivité.
+    ///
+    /// Pendant la frappe on **conserve** le vecteur précédent : les correspondances
+    /// littérales se resserrent à chaque caractère (instantané), tandis que le bloc
+    /// sémantique reste stable et ne se réordonne qu'une fois, à la fin de la saisie.
+    private func scheduleQueryVectorRecompute() {
+        queryVectorTask?.cancel()
+
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard query.count >= Self.minSemanticQueryLength else {
+            queryVector = nil
+            return
+        }
+
+        queryVectorTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.queryDebounce)
+            guard !Task.isCancelled else { return }
+            self?.recomputeQueryVector()
+        }
+    }
+
     private func recomputeQueryVector() {
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        queryVector = query.isEmpty ? nil : embeddingService.vector(for: query)
+        guard query.count >= Self.minSemanticQueryLength else {
+            queryVector = nil
+            return
+        }
+        queryVector = embeddingService.vector(for: query)
     }
 
     // MARK: - Actions
@@ -236,6 +278,12 @@ final class ClipboardStore: ObservableObject {
             items[index].lastCopiedAt = now
         }
         persist { try $0.touch(id: item.id, date: now) }
+        recentlyCopiedID = item.id
+    }
+
+    /// À appeler à la réouverture du panneau : efface le retour visuel « Copié ».
+    func clearCopyFeedback() {
+        recentlyCopiedID = nil
     }
 
     /// Donnée image pleine : en mémoire si présente, sinon chargée depuis la base.
