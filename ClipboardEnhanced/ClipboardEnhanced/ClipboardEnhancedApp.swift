@@ -12,8 +12,10 @@ struct ClipboardEnhancedApp: App {
     @StateObject private var store = ClipboardStore()
 
     var body: some Scene {
-        MenuBarExtra("Clipboard History", systemImage: "clipboard") {
+        MenuBarExtra {
             MenuPanelView(store: store)
+        } label: {
+            Image(systemName: store.isCapturePaused ? "clipboard.fill" : "clipboard")
         }
         .menuBarExtraStyle(.window)
     }

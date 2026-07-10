@@ -10,7 +10,8 @@ Plan itératif. Chaque phase est **livrable et testable** avant de passer à la 
 
 - [x] Projet Xcode « macOS App », SwiftUI (nommé `ClipboardEnhanced`).
 - [x] `INFOPLIST_KEY_LSUIElement = YES` (build settings, Debug + Release) — pas d'icône Dock.
-- [~] Dépendances SPM `GRDB.swift` / `KeyboardShortcuts` → reportées en phase 2/7 (inutiles avant).
+- [~] ~~Dépendances SPM `GRDB.swift` / `KeyboardShortcuts`~~ → **jamais ajoutées**. La phase 2 a livré
+      un wrapper `SQLite3` maison ; la phase 7 a abandonné les raccourcis globaux. **Zéro dépendance externe.**
 - [x] `MenuBarExtra` (SF Symbol `clipboard`), style `.window`.
 - [x] Panneau avec état vide.
 - [x] Build vérifié via `xcodebuild` → **BUILD SUCCEEDED**.
@@ -34,7 +35,7 @@ Plan itératif. Chaque phase est **livrable et testable** avant de passer à la 
 **Validation :** copier plusieurs textes → ils s'empilent, plus récent en haut ;
 cliquer recopie ; la recherche filtre.
 
-> La persistance (SQLite/GRDB) arrive en phase 2 : pour l'instant l'historique est en mémoire
+> La persistance (SQLite) arrive en phase 2 : pour l'instant l'historique est en mémoire
 > (perdu au redémarrage).
 
 ---
@@ -57,14 +58,18 @@ Base dans `~/Library/Containers/com.bde.ClipboardEnhanced/Data/Library/Applicati
 
 ---
 
-## Phase 3 — UI propre + recherche
+## Phase 3 — UI propre + recherche ✅
 **But :** panneau utilisable au quotidien.
 
-- [ ] `ClipboardItemRow` : texte 3 lignes max + `…`, date relative, badge type.
-- [ ] `SearchBar` en haut du panneau.
-- [ ] Table FTS5 sur le contenu texte ; `ClipboardRepository.search(query)`.
-- [ ] Filtrage temps réel.
-- [ ] Liste scrollable, largeur/hauteur fixes raisonnables, état vide.
+- [x] `ClipboardItemRow` : texte 3 lignes max + `…`, date relative, symbole du type
+      (ou vignette image / icône fichier quand disponible).
+- [x] Barre de recherche en haut du panneau (sous-vue de `MenuPanelView`, pas de fichier `SearchBar.swift` séparé).
+- [x] Filtrage temps réel (`ClipboardStore.visibleItems`, recalculé à chaque frappe).
+- [x] Liste scrollable (`LazyVStack`), panneau 340 × 440, état vide distinct « aucun élément » / « aucun résultat ».
+- [~] ~~Table FTS5 + `ClipboardRepository.search(query)`~~ → **abandonné**. La rétention plafonne
+      l'historique à 200 éléments : le filtrage en mémoire est instantané et FTS5 n'apporterait
+      qu'une seconde source de vérité à synchroniser. La recherche vit dans le store
+      (littéral + sémantique, cf. phase 6bis).
 
 **Validation :** taper dans la recherche filtre instantanément.
 
@@ -73,12 +78,18 @@ Base dans `~/Library/Containers/com.bde.ClipboardEnhanced/Data/Library/Applicati
 ## Phase 4 — Coller (mode « copier seulement »)
 **But :** cliquer un item le remet dans le presse-papier (l'utilisateur colle avec Cmd+V).
 
-- [ ] `PasteboardWriter.write(item)` : écrit l'item dans `NSPasteboard.general`.
+- [x] `PasteboardWriter.write(item:imageData:)` : écrit l'item dans `NSPasteboard.general`
+      selon son type (image `NSImage` / fichier `fileURL` / texte).
+- [x] `suppressNextCapture` : la réécriture ne se ré-historise pas elle-même ;
+      l'item recopié remonte via `lastCopiedAt`.
 - [ ] Fermer le panneau au clic, feedback visuel (« copié »).
-- [ ] **Pas** de simulation Cmd+V ni de permission Accessibilité dans le MVP.
+- [x] **Pas** de simulation Cmd+V ni de permission Accessibilité dans le MVP.
 - [ ] *(Option future, non bloquante)* : réglage « copier + coller auto » via `CGEvent`.
 
 **Validation :** cliquer un item ancien → Cmd+V dans n'importe quelle app recolle ce contenu.
+
+> Reste à faire : le panneau ne se referme pas après un clic et rien n'indique que la copie
+> a eu lieu. Fonctionnellement correct, mais l'utilisateur n'a aucun retour.
 
 ---
 
@@ -144,16 +155,18 @@ Pas d'API Apple texte→image (pas de CLIP).
 
 ---
 
-## Phase 7 — Mode private + raccourcis globaux
-**But :** confidentialité et accès clavier.
+## Phase 7 — Mode privé ✅
+**But :** confidentialité. (Raccourcis globaux **abandonnés** : l'app reste minimale — juste
+l'icône en barre de menus, pas d'ouverture programmatique ailleurs.)
 
-- [ ] `PrivacyFilter` : ignorer `org.nspasteboard.ConcealedType` / `TransientType`.
-- [ ] Toggle « Pause la capture » dans le menu (mode private manuel).
-- [ ] `KeyboardShortcuts` : hotkey global pour ouvrir le panneau (défaut Cmd+Shift+V).
-- [ ] Navigation clavier dans la liste (↑/↓, Entrée = coller, Échap = fermer).
+- [x] Respect auto des types `org.nspasteboard.ConcealedType` / `TransientType` (dans `PasteboardReader`).
+- [x] Toggle « Pause la capture » (mode privé manuel) : rien n'est capturé pendant la pause.
+- [x] Bandeau « Capture en pause » + icône barre de menus qui change (`clipboard.fill`).
+- [x] Build vérifié → **BUILD SUCCEEDED**.
+- [~] ~~Raccourci global~~ / ~~navigation clavier~~ → hors périmètre (décision produit : app minimale).
 
 **Validation :** copier depuis un gestionnaire de mots de passe → rien n'est historisé ;
-le raccourci ouvre le panneau partout.
+activer la pause → les copies ne sont pas enregistrées.
 
 ---
 

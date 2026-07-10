@@ -14,11 +14,28 @@ struct MenuPanelView: View {
         VStack(spacing: 0) {
             searchBar
             Divider()
+            if store.isCapturePaused {
+                pausedBanner
+                Divider()
+            }
             content
             Divider()
             footer
         }
         .frame(width: 340, height: 440)
+    }
+
+    private var pausedBanner: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "pause.circle.fill")
+            Text("Capture en pause — rien n'est enregistré")
+            Spacer()
+        }
+        .font(.caption)
+        .foregroundStyle(.orange)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.orange.opacity(0.12))
     }
 
     // MARK: - Sous-vues
@@ -76,11 +93,23 @@ struct MenuPanelView: View {
     }
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: 12) {
             Text("\(store.items.count) élément\(store.items.count > 1 ? "s" : "")")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
+            Button {
+                store.isCapturePaused.toggle()
+            } label: {
+                Label(
+                    store.isCapturePaused ? "Reprendre" : "Pause",
+                    systemImage: store.isCapturePaused ? "play.fill" : "pause.fill"
+                )
+            }
+            .buttonStyle(.borderless)
+            .font(.caption)
+            .help(store.isCapturePaused ? "Reprendre la capture" : "Suspendre la capture (mode privé)")
+
             Button("Quitter") {
                 NSApplication.shared.terminate(nil)
             }

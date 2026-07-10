@@ -22,6 +22,10 @@ final class ClipboardStore: ObservableObject {
         didSet { recomputeQueryVector() }
     }
 
+    /// Mode privé manuel : quand `true`, rien n'est capturé (les copies faites
+    /// pendant la pause ne sont pas historisées). Non persisté : reprise au lancement.
+    @Published var isCapturePaused = false
+
     let settings: AppSettings
 
     private let monitor: ClipboardMonitor
@@ -137,6 +141,8 @@ final class ClipboardStore: ObservableObject {
             suppressNextCapture = false
             return
         }
+        // Mode privé : on ignore le contenu copié pendant la pause.
+        guard !isCapturePaused else { return }
         guard let captured = reader.read() else { return }
 
         // Limite de taille pour le texte (les images sont déjà bornées par le reader).
