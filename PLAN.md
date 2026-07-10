@@ -75,21 +75,23 @@ Base dans `~/Library/Containers/com.bde.ClipboardEnhanced/Data/Library/Applicati
 
 ---
 
-## Phase 4 — Coller (mode « copier seulement »)
+## Phase 4 — Coller (mode « copier seulement ») ✅
 **But :** cliquer un item le remet dans le presse-papier (l'utilisateur colle avec Cmd+V).
 
 - [x] `PasteboardWriter.write(item:imageData:)` : écrit l'item dans `NSPasteboard.general`
       selon son type (image `NSImage` / fichier `fileURL` / texte).
 - [x] `suppressNextCapture` : la réécriture ne se ré-historise pas elle-même ;
       l'item recopié remonte via `lastCopiedAt`.
-- [ ] Fermer le panneau au clic, feedback visuel (« copié »).
+- [x] Feedback visuel : badge « Copié » (`recentlyCopiedID`) sur la ligne, puis fermeture
+      du panneau après 400 ms. Le badge est effacé à la réouverture (`clearCopyFeedback()`).
 - [x] **Pas** de simulation Cmd+V ni de permission Accessibilité dans le MVP.
+- [x] Build vérifié → **BUILD SUCCEEDED**.
 - [ ] *(Option future, non bloquante)* : réglage « copier + coller auto » via `CGEvent`.
 
-**Validation :** cliquer un item ancien → Cmd+V dans n'importe quelle app recolle ce contenu.
+**Note technique** : `@Environment(\.dismiss)` est sans effet sur un `MenuBarExtra` en style
+`.window`. La fermeture passe par `NSApp.keyWindow?.close()` sur le `NSPanel` sous-jacent.
 
-> Reste à faire : le panneau ne se referme pas après un clic et rien n'indique que la copie
-> a eu lieu. Fonctionnellement correct, mais l'utilisateur n'a aucun retour.
+**Validation :** cliquer un item ancien → Cmd+V dans n'importe quelle app recolle ce contenu.
 
 ---
 
@@ -104,7 +106,7 @@ Base dans `~/Library/Containers/com.bde.ClipboardEnhanced/Data/Library/Applicati
 - [x] `PasteboardWriter` : réécrit image (NSImage) / fichier (fileURL) / texte selon le type.
 - [x] `ClipboardItemRow` : vignette image/icône fichier, sinon symbole du type.
 - [x] Limite texte ~1 Mo (déjà en place).
-- [x] Garde confidentialité minimal : contenus *concealed*/*transient* non capturés (mode privé complet → phase 7).
+- [~] ~~Garde confidentialité : contenus *concealed*/*transient* non capturés~~ → **retiré** (cf. phase 7).
 - [x] **Libellé image intelligent** : OCR local (Vision, asynchrone) → sinon `alt` HTML → sinon
       nom/domaine de l'URL source → sinon « Image · L × H ». Rend les captures d'écran cherchables.
 - [x] Build vérifié → **BUILD SUCCEEDED**.
@@ -142,8 +144,11 @@ copier un dossier → non historisé ; image > 10 Mo → ignorée ; copie depuis
 - [x] `VectorMath` : sérialisation BLOB ⟷ `[Float]` + similarité cosinus.
 - [x] Migration schéma v2 : colonne `embedding` (BLOB).
 - [x] Vecteur calculé à l'insertion (tous types) + **recalcul après OCR** ; backfill au chargement du modèle.
-- [x] Recherche **hybride** : littérales d'abord, puis sémantiques (cosinus ≥ 0.30, top 25),
-      force brute sur ≤ 200 éléments. Requête vectorisée en cache (recalcul à chaque frappe).
+- [x] Recherche **hybride** : littérales d'abord, puis sémantiques (cosinus ≥ 0.50, top 5),
+      force brute sur ≤ 200 éléments.
+- [x] **Stabilité de l'ordre** : sémantique ignorée sous 3 caractères ; vecteur de requête
+      recalculé après 250 ms d'inactivité (debounce) et **conservé pendant la frappe**, pour que
+      le bloc sémantique ne se réordonne qu'une fois, à la fin de la saisie.
 - [x] Fallback littéral tant que le modèle n'est pas prêt (dégradation propre, un seul espace vectoriel).
 - [x] Build vérifié → **BUILD SUCCEEDED**.
 
@@ -159,14 +164,21 @@ Pas d'API Apple texte→image (pas de CLIP).
 **But :** confidentialité. (Raccourcis globaux **abandonnés** : l'app reste minimale — juste
 l'icône en barre de menus, pas d'ouverture programmatique ailleurs.)
 
-- [x] Respect auto des types `org.nspasteboard.ConcealedType` / `TransientType` (dans `PasteboardReader`).
+- [~] ~~Respect auto des types `org.nspasteboard.ConcealedType` / `TransientType`~~ → **retiré**.
+      Le filtre ne couvrait que les gestionnaires natifs (une extension navigateur copie du texte
+      brut sans marqueur) : couverture partielle, fausse impression de sécurité. **Tout est
+      historisé, mots de passe compris.** Le rempart devient la protection de la base.
 - [x] Toggle « Pause la capture » (mode privé manuel) : rien n'est capturé pendant la pause.
+      **Seul contrôle de confidentialité restant.**
 - [x] Bandeau « Capture en pause » + icône barre de menus qui change (`clipboard.fill`).
 - [x] Build vérifié → **BUILD SUCCEEDED**.
 - [~] ~~Raccourci global~~ / ~~navigation clavier~~ → hors périmètre (décision produit : app minimale).
 
-**Validation :** copier depuis un gestionnaire de mots de passe → rien n'est historisé ;
+**Validation :** copier un contenu marqué `ConcealedType` → il **est** historisé (vérifié) ;
 activer la pause → les copies ne sont pas enregistrées.
+
+> ⚠️ **Dette ouverte** : la base est en clair. Tant que la protection par identifiants n'est pas
+> livrée, les mots de passe copiés sont lisibles dans `history.sqlite`.
 
 ---
 
@@ -184,7 +196,7 @@ activer la pause → les copies ne sont pas enregistrées.
 ## Phase 9 — Polish, tests, distribution
 **But :** qualité finale.
 
-- [ ] Tests unitaires : repository (CRUD, dédoublonnage, recherche), rétention, privacy filter.
+- [ ] Tests unitaires : repository (CRUD, dédoublonnage, recherche), rétention, pause de capture.
 - [ ] Gestion d'erreurs (DB inaccessible, permission refusée).
 - [ ] Icônes, libellés, accessibilité VoiceOver.
 - [ ] Signature + notarisation (distribution directe) **ou** sandbox App Store (décision ici).
@@ -197,10 +209,15 @@ activer la pause → les copies ne sont pas enregistrées.
 ## Décisions actées
 - **Collage : « copier seulement »** pour le MVP (pas de Cmd+V auto, pas de permission Accessibilité).
   Le collage automatique reste une option future non bloquante.
+- **Aucun filtrage des mots de passe** : les marqueurs *concealed*/*transient* sont ignorés.
+  La confidentialité repose sur (1) le caractère 100 % local, (2) la pause manuelle,
+  (3) **à venir** : la protection de la base par identifiants.
 
 ## Décisions reportées (à trancher en temps voulu)
 - **Distribution : à décider en phase 9** (directe .dmg vs App Store sandbox). On code sans présumer :
   éviter les API incompatibles sandbox tant que possible, trancher au moment de la distribution.
-- Chiffrage de la base (SQLCipher) — sécurité renforcée.
+- **Protection de la base par identifiants** (⚠️ devenue un prérequis, plus une option, depuis le
+  retrait du filtre concealed) : verrouillage à l'ouverture du panneau et/ou chiffrement au repos
+  (SQLCipher, ou clé dans le Trousseau + chiffrement applicatif). **À spécifier.**
 - Favicons / aperçus riches d'URL.
 - Sync iCloud propre à l'app (explicitement hors scope actuel).
