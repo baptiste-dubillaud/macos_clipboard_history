@@ -135,7 +135,7 @@ struct MenuPanelView: View {
             .help(store.isCapturePaused ? "Reprendre la capture" : "Suspendre la capture (mode privé)")
 
             SettingsLink {
-                Image(systemName: "gearshape")
+                Label("Réglages", systemImage: "gearshape")
             }
             .buttonStyle(.borderless)
             .font(.caption)
@@ -146,11 +146,17 @@ struct MenuPanelView: View {
                 NSApp.activate(ignoringOtherApps: true)
             })
 
-            Button("Quitter") {
+            Divider()
+                .frame(height: 16)
+
+            Button {
                 NSApplication.shared.terminate(nil)
+            } label: {
+                Label("Quitter", systemImage: "power")
             }
             .buttonStyle(.borderless)
             .font(.caption)
+            .help("Quitter l'application")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
