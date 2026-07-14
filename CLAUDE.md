@@ -12,14 +12,17 @@ Au clic, elle affiche l'historique copier/coller (texte, URL, image, fichier) av
 |----------------|----------------------------------------|--------|
 | Langage        | Swift 5.9+                             | Natif, performant |
 | UI             | SwiftUI + `MenuBarExtra` (`.window`)  | Vue riche dans la barre de menus (macOS 13+) |
-| Cible          | macOS 13 Ventura minimum               | `MenuBarExtra` requiert 13+ |
+| Cible          | **macOS 26.5** (`MACOSX_DEPLOYMENT_TARGET`) | `MenuBarExtra` exige 13+, `SettingsLink` 14+ ; la cible réelle du projet est bien plus haute |
 | Persistance    | **SQLite brut** (lib système `SQLite3`) | Zéro dépendance externe ; wrapper maison `Database`/`Statement` |
-| Hash/dédup     | **CryptoKit** (SHA-256)                | Framework système, empreinte de contenu |
+| Chiffrement    | **CryptoKit** (AES-GCM) + **Trousseau** | Contenus chiffrés au repos ; clé dans le Trousseau de session |
+| Dédup          | **CryptoKit** (HMAC-SHA256 à clé)      | Empreinte déterministe mais non devinable |
 | Sémantique     | **NLContextualEmbedding** (Natural Language) | Embeddings de texte sur-appareil |
 | OCR            | **Vision**                             | Texte des images (cherchable) |
+| Démarrage      | **SMAppService**                       | Lancement au login |
 | Build          | Xcode + Swift Package Manager          | — |
 
-Dépendances externes : **aucune** (SQLite, CryptoKit, NaturalLanguage, Vision sont système).
+Dépendances externes : **aucune** (SQLite, CryptoKit, NaturalLanguage, Vision,
+Security, SMAppService sont système).
 
 > Décision produit : **app minimale** — uniquement l'icône en barre de menus, **pas de raccourcis
 > globaux** ni d'ouverture programmatique. (`MenuBarExtra` ne peut de toute façon pas être ouvert par API.)
@@ -92,7 +95,7 @@ Dépendances externes : **aucune** (SQLite, CryptoKit, NaturalLanguage, Vision s
   Raison : le filtre ne couvrait de toute façon que les gestionnaires natifs — une extension
   navigateur copie du texte brut sans marqueur, donc indétectable. Il donnait une **fausse
   impression de sécurité** pour une couverture partielle.
-- **Le vrai rempart** : l'historique est 100 % local, et la base sera protégée par identifiants
+- **Le vrai rempart** : l'historique est 100 % local, et la base est **chiffrée au repos**
   (cf. « Sécurité »). Pas d'heuristique « ressemble à un mot de passe » — trop de faux positifs.
 - **Contrôle manuel** : toggle « Pause » dans le panneau → suspend la capture.
 
@@ -103,9 +106,11 @@ Dépendances externes : **aucune** (SQLite, CryptoKit, NaturalLanguage, Vision s
   d'inactivité, pour que l'ordre ne change pas à chaque frappe.
 - Fallback littéral tant que le modèle sémantique n'est pas chargé.
 
-### Réglages (phase 8)
-- Politique de rétention (durée + nombre).
-- Lancer au démarrage (`SMAppService`).
+### Réglages
+- Fenêtre `Settings`, ouverte par le bouton engrenage du panneau (l'app `LSUIElement`
+  n'a pas de menu applicatif). Purge immédiate au resserrement d'un réglage.
+- Politique de rétention : durée (1–7 j) + nombre (10–200).
+- Lancer au démarrage (`SMAppService.mainApp`) — état détenu par le système, pas par nous.
 
 ---
 
@@ -115,7 +120,7 @@ Dépendances externes : **aucune** (SQLite, CryptoKit, NaturalLanguage, Vision s
 ClipboardEnhanced/ClipboardEnhanced/
 ├── ClipboardEnhancedApp.swift           # @main, MenuBarExtra, crée le store
 ├── Models/
-│   ├── ClipboardItem.swift              # struct Identifiable + hash SHA-256
+│   ├── ClipboardItem.swift              # struct Identifiable (empreinte HMAC fournie par le store)
 │   ├── ClipboardItemType.swift          # enum text/url/image/file (+ symbole SF)
 │   ├── CapturedContent.swift            # contenu brut lu du pasteboard, avant persistance
 │   └── AppSettings.swift                # ObservableObject, UserDefaults (rétention)
@@ -126,30 +131,34 @@ ClipboardEnhanced/ClipboardEnhanced/
 │   ├── ClipboardMonitor.swift           # Timer 0,5 s + changeCount
 │   ├── PasteboardReader.swift           # lit le pasteboard, filtre les types sensibles
 │   ├── PasteboardWriter.swift           # réécrit l'item (mode « copier seulement »)
-│   └── EmbeddingService.swift           # NLContextualEmbedding, prepare() async
+│   ├── EmbeddingService.swift           # NLContextualEmbedding, prepare() async
+│   └── DatabaseKeyStore.swift           # clé AES du Trousseau de session (sans biométrie)
 ├── Storage/
 │   ├── Database.swift                   # wrapper SQLite3 maison (Database + Statement, WAL)
 │   └── ClipboardRepository.swift        # schéma, migrations, CRUD, purge
 ├── UI/
 │   ├── MenuPanelView.swift              # racine du panneau (recherche + liste + footer)
-│   └── ClipboardItemRow.swift           # rendu d'un élément
+│   ├── ClipboardItemRow.swift           # rendu d'un élément
+│   └── SettingsView.swift               # fenêtre Réglages (rétention, démarrage)
 └── Utilities/
     ├── Date+Relative.swift
     ├── ImageProcessing.swift            # normalisation PNG + vignette ~300 px
     ├── ImageTextRecognizer.swift        # OCR Vision (asynchrone)
+    ├── ContentCipher.swift              # AES-GCM (contenus) + HMAC (empreinte de dédoublonnage)
     └── VectorMath.swift                 # [Float] ⟷ BLOB, similarité cosinus
 ```
 
-> Pas de `PrivacyFilter`, `RetentionService`, `DatabaseManager`, `SearchBar` ni `SettingsView` :
-> le filtrage sensible vit dans `PasteboardReader`, la rétention et la recherche dans
-> `ClipboardStore`, l'init de la base dans `ClipboardRepository`. `SettingsView` arrive en phase 8.
+> Pas de `PrivacyFilter`, `RetentionService`, `DatabaseManager` ni `SearchBar` : il n'y a plus de
+> filtrage sensible, la rétention et la recherche vivent dans `ClipboardStore`, l'init de la base
+> dans `ClipboardRepository`, et la barre de recherche est une sous-vue de `MenuPanelView`.
 
 ### Flux
 1. `ClipboardMonitor` détecte un changement de `changeCount` → notifie `ClipboardStore`.
 2. `ClipboardStore` ignore la capture si la pause manuelle est active ;
    sinon `PasteboardReader` renvoie un `CapturedContent` typé (aucun filtrage de confidentialité).
-3. `ClipboardStore` dédoublonne par hash (remonte l'existant) ou insère,
-   puis persiste via `ClipboardRepository`.
+3. `ClipboardStore` dédoublonne par empreinte HMAC (remonte l'existant) ou insère,
+   puis persiste via `ClipboardRepository`, qui chiffre les contenus (AES-GCM) avant écriture.
+   Au démarrage, `prepareStorage()` charge la clé du Trousseau et déchiffre l'historique.
 4. `ClipboardStore.applyRetention()` purge après chaque ajout (nombre) et via timer 120 s (âge).
 5. `MenuPanelView` observe le store et affiche `visibleItems` (tri + recherche hybride).
 6. Clic → `PasteboardWriter` écrit dans `NSPasteboard.general` ; la capture suivante est ignorée.
@@ -167,11 +176,20 @@ ClipboardEnhanced/ClipboardEnhanced/
 ## Sécurité & confidentialité
 - 100 % local, aucun réseau, aucune télémétrie.
 - Les types *concealed*/*transient* sont **ignorés** : mots de passe inclus dans l'historique.
-- ⚠️ **Conséquence directe** : la base est aujourd'hui du **SQLite en clair**, lisible par tout
-  process ayant accès au conteneur. Protéger la base (identifiants / chiffrement) est donc
-  un **prérequis**, plus une amélioration optionnelle. Cf. « Décisions reportées » dans PLAN.md.
-- **L'app est déjà sandboxée** (`ENABLE_APP_SANDBOX = YES`) et n'utilise ni `CGEvent` ni bookmarks :
-  rien ne bloque la voie App Store. Le choix directe/App Store reste ouvert (phase 9).
+- **Chiffrement au repos (AES-GCM)** : les colonnes de contenu (`text`, `data`, `thumbnail`,
+  `file_path`, `embedding`) sont chiffrées. Un `sqlite3 history.sqlite` ne montre que du binaire.
+  - Clé AES-256 dans le **Trousseau de session** (`DatabaseKeyStore`), créée et relue en silence.
+    Ce trousseau **ne requiert aucun entitlement** → pas de profil de provisioning à renouveler.
+  - `content_hash` est un **HMAC-SHA256 à clé** (pas un SHA-256 nu) : déterministe pour le
+    dédoublonnage, mais non devinable — sinon l'empreinte d'un mot de passe court serait
+    cassable par force brute alors même que le contenu est chiffré.
+  - **Pas de verrou biométrique** (décision produit) : protéger contre « quelqu'un devant la
+    session déverrouillée » aurait imposé le Trousseau data-protection (Touch ID) + son
+    entitlement + un profil expirant tous les 7 jours (compte Apple gratuit). Jugé disproportionné
+    pour un presse-papier local. Perdre la clé du Trousseau = historique illisible (assumé).
+  - Mode dégradé : si le Trousseau refuse la clé, clé éphémère en mémoire, rien n'est persisté.
+- **L'app est sandboxée** (`ENABLE_APP_SANDBOX = YES`) et n'utilise ni `CGEvent` ni bookmarks.
+  Signée avec la Personal Team (compte gratuit) ; la distribution reste ouverte (phase 9).
 
 ---
 

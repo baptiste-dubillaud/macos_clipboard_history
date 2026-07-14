@@ -134,6 +134,18 @@ struct MenuPanelView: View {
             .font(.caption)
             .help(store.isCapturePaused ? "Reprendre la capture" : "Suspendre la capture (mode privé)")
 
+            SettingsLink {
+                Image(systemName: "gearshape")
+            }
+            .buttonStyle(.borderless)
+            .font(.caption)
+            .help("Réglages")
+            // L'app est accessoire (LSUIElement) : sans activation explicite, la fenêtre
+            // de réglages s'ouvre derrière celle de l'app au premier plan.
+            .simultaneousGesture(TapGesture().onEnded {
+                NSApp.activate(ignoringOtherApps: true)
+            })
+
             Button("Quitter") {
                 NSApplication.shared.terminate(nil)
             }

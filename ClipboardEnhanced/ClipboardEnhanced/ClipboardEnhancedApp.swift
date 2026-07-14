@@ -18,5 +18,11 @@ struct ClipboardEnhancedApp: App {
             Image(systemName: store.isCapturePaused ? "clipboard.fill" : "clipboard")
         }
         .menuBarExtraStyle(.window)
+
+        // L'app est LSUIElement : elle n'a pas de menu applicatif, donc cette fenêtre
+        // n'est atteignable que par le bouton « Réglages » du panneau.
+        Settings {
+            SettingsView(settings: store.settings)
+        }
     }
 }

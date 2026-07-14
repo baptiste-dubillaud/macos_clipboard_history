@@ -5,7 +5,6 @@
 //  Modèle d'un élément de l'historique du presse-papier.
 //
 
-import CryptoKit
 import Foundation
 
 /// Un élément capturé depuis le presse-papier.
@@ -64,7 +63,10 @@ struct ClipboardItem: Identifiable {
     }
 
     /// Construit un item à partir d'un contenu fraîchement capturé.
-    init(captured: CapturedContent, id: UUID = UUID(), date: Date = Date()) {
+    ///
+    /// L'empreinte est fournie par l'appelant : elle est calculée par `ContentCipher`
+    /// (HMAC à clé), le modèle n'a pas accès à la clé de session.
+    init(captured: CapturedContent, contentHash: String, id: UUID = UUID(), date: Date = Date()) {
         self.init(
             id: id,
             type: captured.type,
@@ -75,22 +77,7 @@ struct ClipboardItem: Identifiable {
             imageData: captured.imageData,
             thumbnailData: captured.thumbnailData,
             filePath: captured.filePath,
-            contentHash: Self.contentHash(captured)
+            contentHash: contentHash
         )
-    }
-
-    /// Empreinte SHA-256 discriminante selon le type :
-    /// image → octets, fichier → chemin, texte/URL → texte.
-    static func contentHash(_ content: CapturedContent) -> String {
-        let basis: Data
-        switch content.type {
-        case .image: basis = content.imageData ?? Data()
-        case .file:  basis = Data((content.filePath ?? "").utf8)
-        case .text, .url: basis = Data(content.text.utf8)
-        }
-        var hasher = SHA256()
-        hasher.update(data: Data(content.type.rawValue.utf8))
-        hasher.update(data: basis)
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }

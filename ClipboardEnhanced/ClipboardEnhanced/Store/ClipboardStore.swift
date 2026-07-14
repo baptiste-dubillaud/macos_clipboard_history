@@ -8,6 +8,7 @@
 
 import AppKit
 import Combine
+import CryptoKit
 
 /// Détient l'historique et orchestre la capture.
 ///
@@ -33,10 +34,25 @@ final class ClipboardStore: ObservableObject {
     let settings: AppSettings
 
     private let monitor: ClipboardMonitor
-    private let repository: ClipboardRepository?
     private let reader: PasteboardReader
     private let writer: PasteboardWriter
     private let embeddingService: EmbeddingService
+
+    /// Dépôt et chiffreur, disponibles une fois la clé chargée (au démarrage).
+    /// Le chiffreur est toujours présent après `prepareStorage()` — clé du Trousseau,
+    /// ou clé éphémère de session si le Trousseau refuse (mode dégradé mémoire seule) ;
+    /// le dépôt reste `nil` dans ce dernier cas, donc rien n'est persisté.
+    private var repository: ClipboardRepository?
+    private var cipher: ContentCipher?
+
+    /// Copies survenues pendant le bref chargement de la clé (démarrage). Elles sont
+    /// mises de côté puis rejouées : sans ce tampon, une app lancée au démarrage
+    /// perdrait les premières copies avant que la clé ne soit prête.
+    private var pendingCaptures: [CapturedContent] = []
+    private var pendingBytes = 0
+
+    /// Plafond mémoire du tampon : une image fait jusqu'à 10 Mo.
+    private static let maxPendingBytes = 64 * 1024 * 1024
 
     /// Vecteur de la requête courante. `@Published` : sa mise à jour différée (debounce)
     /// doit rafraîchir la liste, alors que `searchQuery` a déjà cessé de changer.
@@ -61,6 +77,9 @@ final class ClipboardStore: ObservableObject {
 
     /// Vérifie périodiquement la rétention par âge (pendant que l'app est inactive).
     private var retentionTimer: Timer?
+
+    /// Abonnements aux réglages (rétention).
+    private var cancellables = Set<AnyCancellable>()
     private static let retentionInterval: TimeInterval = 120
 
     /// Taille maximale d'un contenu texte (cf. limites de stockage). Au-delà : ignoré.
@@ -68,7 +87,6 @@ final class ClipboardStore: ObservableObject {
 
     init(
         monitor: ClipboardMonitor? = nil,
-        repository: ClipboardRepository? = nil,
         reader: PasteboardReader? = nil,
         writer: PasteboardWriter? = nil,
         settings: AppSettings? = nil,
@@ -80,21 +98,6 @@ final class ClipboardStore: ObservableObject {
         self.settings = settings ?? AppSettings()
         self.embeddingService = embeddingService ?? EmbeddingService()
 
-        if let repository {
-            self.repository = repository
-        } else {
-            do {
-                self.repository = try ClipboardRepository()
-            } catch {
-                NSLog("[ClipboardEnhanced] Dépôt indisponible, mode mémoire seule : \(error)")
-                self.repository = nil
-            }
-        }
-
-        // Charge l'historique persisté, puis applique la rétention au lancement.
-        items = (try? self.repository?.fetchAll()) ?? []
-        applyRetention()
-
         self.monitor.onChange = { [weak self] in
             self?.captureCurrent()
         }
@@ -102,9 +105,23 @@ final class ClipboardStore: ObservableObject {
         // la surveillance ici pour capturer dès le départ, panneau ouvert ou non.
         self.monitor.start()
 
+        // Charge la clé, ouvre la base chiffrée et rejoue les copies tamponnées.
+        Task { [weak self] in await self?.prepareStorage() }
+
         retentionTimer = Timer.scheduledTimer(withTimeInterval: Self.retentionInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.applyRetention() }
         }
+
+        // Purge immédiate quand l'utilisateur resserre la rétention dans les réglages.
+        // `@Published` émet dans `willSet` : on diffère d'un tour de boucle, sinon
+        // `applyRetention()` relirait encore l'ancienne valeur.
+        // (`dropFirst()` sur chacun : à l'abonnement, `@Published` rejoue la valeur courante.)
+        self.settings.$retentionDays.dropFirst()
+            .merge(with: self.settings.$maxItems.dropFirst())
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.applyRetention() }
+            }
+            .store(in: &cancellables)
 
         // Charge le modèle d'embedding (asynchrone), puis calcule les vecteurs manquants.
         Task { [weak self] in
@@ -151,6 +168,40 @@ final class ClipboardStore: ObservableObject {
         return literal + semantic
     }
 
+    // MARK: - Stockage
+
+    /// Charge la clé, ouvre la base chiffrée et charge l'historique déchiffré.
+    ///
+    /// Si le Trousseau refuse la clé, on bascule en **mode dégradé** : une clé
+    /// éphémère de session chiffre les contenus en mémoire (le chiffreur reste
+    /// disponible pour l'empreinte de dédoublonnage), mais rien n'est persisté.
+    /// L'app fonctionne, l'historique est simplement perdu au redémarrage.
+    private func prepareStorage() async {
+        do {
+            // Les appels Trousseau peuvent bloquer : hors du MainActor.
+            let key = try await Task.detached(priority: .userInitiated) {
+                try DatabaseKeyStore.loadOrCreateKey()
+            }.value
+
+            let cipher = ContentCipher(key: key)
+            self.cipher = cipher
+
+            let repository = try ClipboardRepository(cipher: cipher)
+            self.repository = repository
+            items = try repository.fetchAll()
+            applyRetention()
+        } catch {
+            // Trousseau refusé ou base illisible : clé éphémère, rien n'est persisté.
+            let message = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            NSLog("[ClipboardEnhanced] Stockage indisponible, mode mémoire seule : \(message)")
+            if cipher == nil { cipher = ContentCipher(key: SymmetricKey(size: .bits256)) }
+            repository = nil
+        }
+
+        replayPendingCaptures()
+        backfillEmbeddings()
+    }
+
     // MARK: - Capture
 
     private func captureCurrent() {
@@ -167,7 +218,36 @@ final class ClipboardStore: ObservableObject {
             guard captured.text.utf8.count <= Self.maxTextBytes else { return }
         }
 
-        let hash = ClipboardItem.contentHash(captured)
+        // Avant que la clé ne soit prête (bref, au démarrage) : on tamponne.
+        guard cipher != nil else {
+            buffer(captured)
+            return
+        }
+        ingest(captured)
+    }
+
+    /// Met de côté une copie survenue avant que la clé ne soit prête.
+    private func buffer(_ captured: CapturedContent) {
+        let size = (captured.imageData?.count ?? 0) + captured.text.utf8.count
+        guard pendingBytes + size <= Self.maxPendingBytes else { return }
+        pendingCaptures.append(captured)
+        pendingBytes += size
+    }
+
+    /// Rejoue les copies tamponnées, dans l'ordre, une fois la clé disponible.
+    private func replayPendingCaptures() {
+        let captures = pendingCaptures
+        pendingCaptures = []
+        pendingBytes = 0
+        for captured in captures {
+            ingest(captured)
+        }
+    }
+
+    /// Insère (ou dédoublonne) un contenu capturé. Exige la clé de session.
+    private func ingest(_ captured: CapturedContent) {
+        guard let cipher else { return }
+        let hash = cipher.fingerprint(captured)
 
         // Dédoublonnage côté store : un contenu identique remonte au lieu d'être dupliqué.
         if let index = items.firstIndex(where: { $0.contentHash == hash }) {
@@ -177,7 +257,7 @@ final class ClipboardStore: ObservableObject {
             return
         }
 
-        let item = ClipboardItem(captured: captured)
+        let item = ClipboardItem(captured: captured, contentHash: hash)
         items.insert(item, at: 0)
         persist { try $0.insert(item) }
 
@@ -198,9 +278,8 @@ final class ClipboardStore: ObservableObject {
         Task.detached(priority: .utility) { [weak self] in
             let text = ImageTextRecognizer.recognizeText(in: pngData)
             guard !text.isEmpty else { return }
-            await MainActor.run {
-                self?.updateItemText(id: itemID, text: text)
-            }
+            // `updateItemText` est isolé au MainActor : l'`await` y hop automatiquement.
+            await self?.updateItemText(id: itemID, text: text)
         }
     }
 

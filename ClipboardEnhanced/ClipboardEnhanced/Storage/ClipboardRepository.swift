@@ -9,14 +9,17 @@ import Foundation
 
 /// CRUD de l'historique au-dessus de `Database`.
 ///
-/// Le schéma prévoit dès maintenant les colonnes image/fichier (`data`,
-/// `thumbnail`, `bookmark`, `file_path`) pour éviter une migration en phase 5.
-/// En phase 2, seules les colonnes texte sont alimentées.
+/// **Colonnes chiffrées** (AES-GCM, cf. `ContentCipher`) : `text`, `data`,
+/// `thumbnail`, `file_path`, `embedding`. Restent en clair celles dont le moteur a
+/// besoin pour trier et purger : `id`, `type`, les dates, `is_pinned`, et
+/// `content_hash` — qui est un HMAC à clé, donc opaque sans la clé.
 @MainActor
 final class ClipboardRepository {
     private let db: Database
+    private let cipher: ContentCipher
 
-    init() throws {
+    init(cipher: ContentCipher) throws {
+        self.cipher = cipher
         let url = try Self.databaseURL()
         db = try Database(path: url.path)
         try migrate()
@@ -39,41 +42,39 @@ final class ClipboardRepository {
 
     // MARK: - Migrations
 
+    /// v3 : chiffrement au repos. Les colonnes sensibles passent de TEXT à BLOB, et
+    /// l'ancien contenu **est détruit** — il a été écrit en clair, et sa réécriture
+    /// chiffrée le laisserait de toute façon récupérable dans les pages libérées du
+    /// fichier. Repartir d'un fichier neuf est la seule remise à zéro honnête.
     private func migrate() throws {
-        var version = try db.userVersion()
+        let version = try db.userVersion()
+        guard version < 3 else { return }
 
-        if version < 1 {
-            try db.execute("""
-                CREATE TABLE IF NOT EXISTS clipboard_item (
-                    id             TEXT PRIMARY KEY,
-                    type           TEXT NOT NULL,
-                    text           TEXT NOT NULL DEFAULT '',
-                    data           BLOB,
-                    thumbnail      BLOB,
-                    bookmark       BLOB,
-                    file_path      TEXT,
-                    content_hash   TEXT NOT NULL,
-                    created_at     REAL NOT NULL,
-                    last_copied_at REAL NOT NULL,
-                    is_pinned      INTEGER NOT NULL DEFAULT 0
-                );
-            """)
-            try db.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_content_hash ON clipboard_item(content_hash);"
-            )
-            try db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_last_copied ON clipboard_item(last_copied_at);"
-            )
-            try db.setUserVersion(1)
-            version = 1
-        }
-
-        // v2 : recherche sémantique (vecteur d'embedding).
-        if version < 2 {
-            try db.execute("ALTER TABLE clipboard_item ADD COLUMN embedding BLOB;")
-            try db.setUserVersion(2)
-            version = 2
-        }
+        try db.execute("DROP TABLE IF EXISTS clipboard_item;")
+        try db.execute("""
+            CREATE TABLE clipboard_item (
+                id             TEXT PRIMARY KEY,
+                type           TEXT NOT NULL,
+                text           BLOB NOT NULL,
+                data           BLOB,
+                thumbnail      BLOB,
+                file_path      BLOB,
+                embedding      BLOB,
+                content_hash   TEXT NOT NULL,
+                created_at     REAL NOT NULL,
+                last_copied_at REAL NOT NULL,
+                is_pinned      INTEGER NOT NULL DEFAULT 0
+            );
+        """)
+        try db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_content_hash ON clipboard_item(content_hash);"
+        )
+        try db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_last_copied ON clipboard_item(last_copied_at);"
+        )
+        // Réécrit le fichier pour que les anciennes pages en clair ne traînent plus.
+        try db.execute("VACUUM;")
+        try db.setUserVersion(3)
     }
 
     // MARK: - Lecture
@@ -90,18 +91,18 @@ final class ClipboardRepository {
         """)
         var items: [ClipboardItem] = []
         while try statement.step() {
-            let path = statement.string(4)
-            let embeddingData = statement.blob(9)
+            guard let sealedText = statement.blob(2) else { continue }
+            let embeddingData = try cipher.open(statement.blob(9))
             items.append(ClipboardItem(
                 id: UUID(uuidString: statement.string(0)) ?? UUID(),
                 type: ClipboardItemType(rawValue: statement.string(1)) ?? .text,
-                text: statement.string(2),
+                text: try cipher.openString(sealedText),
                 createdAt: Date(timeIntervalSince1970: statement.double(5)),
                 lastCopiedAt: Date(timeIntervalSince1970: statement.double(6)),
                 isPinned: statement.int(7) != 0,
                 imageData: nil,
-                thumbnailData: statement.blob(3),
-                filePath: path.isEmpty ? nil : path,
+                thumbnailData: try cipher.open(statement.blob(3)),
+                filePath: try cipher.openString(statement.blob(4)),
                 embedding: embeddingData.map { VectorMath.vector(from: $0) },
                 contentHash: statement.string(8)
             ))
@@ -113,7 +114,8 @@ final class ClipboardRepository {
     func imageData(id: UUID) throws -> Data? {
         let statement = try db.prepare("SELECT data FROM clipboard_item WHERE id = ?;")
         statement.bind(1, id.uuidString)
-        return try statement.step() ? statement.blob(0) : nil
+        guard try statement.step() else { return nil }
+        return try cipher.open(statement.blob(0))
     }
 
     // MARK: - Écriture
@@ -129,10 +131,10 @@ final class ClipboardRepository {
         statement
             .bind(1, item.id.uuidString)
             .bind(2, item.type.rawValue)
-            .bind(3, item.text)
-            .bind(4, item.imageData)
-            .bind(5, item.thumbnailData)
-            .bind(6, item.filePath)
+            .bind(3, try cipher.seal(item.text))
+            .bind(4, try cipher.seal(item.imageData))
+            .bind(5, try cipher.seal(item.thumbnailData))
+            .bind(6, try cipher.seal(item.filePath))
             .bind(7, item.contentHash)
             .bind(8, item.createdAt.timeIntervalSince1970)
             .bind(9, item.lastCopiedAt.timeIntervalSince1970)
@@ -152,14 +154,17 @@ final class ClipboardRepository {
     /// Met à jour le libellé/texte cherchable (ex. après OCR d'une image).
     func updateText(id: UUID, text: String) throws {
         let statement = try db.prepare("UPDATE clipboard_item SET text = ? WHERE id = ?;")
-        statement.bind(1, text).bind(2, id.uuidString)
+        statement.bind(1, try cipher.seal(text)).bind(2, id.uuidString)
         try statement.step()
     }
 
     /// Stocke le vecteur d'embedding d'un élément.
+    ///
+    /// Chiffré comme le reste : un vecteur sémantique reste une empreinte du contenu,
+    /// et permettrait de tester si une phrase donnée est dans l'historique.
     func updateEmbedding(id: UUID, vector: [Float]) throws {
         let statement = try db.prepare("UPDATE clipboard_item SET embedding = ? WHERE id = ?;")
-        statement.bind(1, VectorMath.data(from: vector)).bind(2, id.uuidString)
+        statement.bind(1, try cipher.seal(VectorMath.data(from: vector))).bind(2, id.uuidString)
         try statement.step()
     }
 

@@ -48,7 +48,7 @@ cliquer recopie ; la recherche filtre.
       → pas de migration en phase 5) + index unique `content_hash` + index `last_copied_at`.
 - [x] `ClipboardRepository` : insert / fetchAll (épinglés puis date) / touch / setPinned / delete.
 - [x] **Dédoublonnage** décidé côté store (mémoire ↔ base cohérentes via `id` partagé) ;
-      empreinte SHA-256 (CryptoKit) en garde-fou côté base.
+      empreinte SHA-256 (CryptoKit) en garde-fou côté base *(→ devenue HMAC-SHA256 en phase 7bis)*.
 - [x] Limite texte ~1 Mo appliquée à l'ingestion.
 - [x] Mode dégradé mémoire seule si la base ne s'ouvre pas (l'app ne crashe jamais).
 - [x] Build vérifié → **BUILD SUCCEEDED**.
@@ -177,19 +177,60 @@ l'icône en barre de menus, pas d'ouverture programmatique ailleurs.)
 **Validation :** copier un contenu marqué `ConcealedType` → il **est** historisé (vérifié) ;
 activer la pause → les copies ne sont pas enregistrées.
 
-> ⚠️ **Dette ouverte** : la base est en clair. Tant que la protection par identifiants n'est pas
-> livrée, les mots de passe copiés sont lisibles dans `history.sqlite`.
+> Cette dette est réglée en **phase 7bis** : la base est désormais chiffrée au repos.
 
 ---
 
-## Phase 8 — Réglages + démarrage
+## Phase 7bis — Chiffrement de la base au repos ✅
+**But :** que les contenus (mots de passe compris) ne soient pas lisibles en clair sur le disque.
+
+- [x] `ContentCipher` : AES-GCM (authentifié) pour `text`, `data`, `thumbnail`, `file_path`,
+      `embedding` ; HMAC-SHA256 **à clé** pour `content_hash`.
+- [x] `content_hash` passe de SHA-256 nu à HMAC : sinon l'empreinte d'un mot de passe court
+      serait cassable par force brute alors que le contenu est chiffré à côté.
+- [x] `DatabaseKeyStore` : clé AES-256 dans le **Trousseau de session**, créée et relue en
+      silence. **Aucun entitlement requis** → pas de profil de provisioning à renouveler.
+- [x] Migration schéma **v3** : colonnes de contenu en BLOB, table recréée (l'ancien historique
+      en clair est détruit — décision produit) + `VACUUM`.
+- [x] `ClipboardStore.prepareStorage()` au démarrage : charge la clé (hors MainActor), ouvre la
+      base, déchiffre l'historique. Copies faites pendant ce bref chargement → tamponnées, rejouées.
+- [x] Mode dégradé : Trousseau indisponible → clé éphémère en mémoire, rien n'est persisté.
+- [x] Build vérifié ; cycle **capture → persistance chiffrée → relance → déchiffrement** vérifié
+      de bout en bout (`sqlite3` ne voit que du binaire, secret absent du fichier, HMAC ≠ SHA-256).
+
+**Décision : pas de verrou biométrique.** Protéger contre « quelqu'un devant la session
+déverrouillée » aurait imposé le Trousseau data-protection (Touch ID) + son entitlement
+`keychain-access-groups` + un profil expirant **tous les 7 jours** (compte Apple gratuit).
+Jugé disproportionné pour un presse-papier local. La menace visée — mots de passe **en clair**
+dans le fichier — est traitée ; celle du poste déverrouillé ne l'est pas, et c'est assumé.
+
+> ⚠️ **Perdre la clé du Trousseau = historique définitivement illisible** (par conception).
+> Un rebuild / renouvellement de certificat ne perd pas la clé (elle dépend du service, pas du
+> binaire) ; changer de bundle ID ou d'équipe, si.
+
+---
+
+## Phase 8 — Réglages + démarrage ✅
 **But :** configuration utilisateur.
 
-- [ ] `AppSettings` (UserDefaults) : rétention, auto-paste, raccourci, lancer au démarrage.
-- [ ] `SettingsView` (fenêtre Réglages standard).
-- [ ] Lancer au démarrage via `SMAppService`.
+- [x] `SettingsView` (scène `Settings`), ouverte par un bouton engrenage du panneau :
+      l'app étant `LSUIElement`, elle n'a pas de menu applicatif « Réglages… ».
+      Activation explicite au clic, sinon la fenêtre s'ouvre derrière l'app au premier plan.
+- [x] Rétention réglable : durée (1–7 j) et nombre (10–200, pas de 10).
+- [x] La purge s'applique **immédiatement** quand on resserre un réglage (abonnement Combine).
+      `@Published` émettant dans `willSet`, le recalcul est différé d'un tour de boucle.
+- [x] Lancer au démarrage via `SMAppService.mainApp`. **Non persisté dans `UserDefaults`** :
+      la source de vérité est le système (désactivable depuis Réglages Système). Erreur
+      d'enregistrement affichée dans la fenêtre.
+- [x] Build vérifié → **BUILD SUCCEEDED** ; lancement sans crash vérifié.
+- [~] ~~auto-paste / raccourci~~ → hors périmètre (cf. phases 4 et 7).
 
 **Validation :** régler 3 jours / 50 items → la rétention s'applique ; relance au login OK.
+
+> ⚠️ **Non vérifié automatiquement** : le contenu de la fenêtre, la purge au changement de
+> réglage et l'enregistrement `SMAppService` demandent un test manuel (piloter la barre de
+> menus exige la permission Accessibilité). `register()` échoue typiquement sur un build
+> non signé lancé depuis Xcode — c'est attendu, l'erreur s'affiche dans la fenêtre.
 
 ---
 
@@ -211,13 +252,13 @@ activer la pause → les copies ne sont pas enregistrées.
   Le collage automatique reste une option future non bloquante.
 - **Aucun filtrage des mots de passe** : les marqueurs *concealed*/*transient* sont ignorés.
   La confidentialité repose sur (1) le caractère 100 % local, (2) la pause manuelle,
-  (3) **à venir** : la protection de la base par identifiants.
+  (3) le **chiffrement de la base au repos** (phase 7bis).
+- **Chiffrement sans verrou biométrique** (phase 7bis) : la clé vit dans le Trousseau de session,
+  sans Touch ID, pour éviter l'entitlement `keychain-access-groups` et son profil à 7 jours.
 
 ## Décisions reportées (à trancher en temps voulu)
 - **Distribution : à décider en phase 9** (directe .dmg vs App Store sandbox). On code sans présumer :
   éviter les API incompatibles sandbox tant que possible, trancher au moment de la distribution.
-- **Protection de la base par identifiants** (⚠️ devenue un prérequis, plus une option, depuis le
-  retrait du filtre concealed) : verrouillage à l'ouverture du panneau et/ou chiffrement au repos
-  (SQLCipher, ou clé dans le Trousseau + chiffrement applicatif). **À spécifier.**
+  NB : signé pour l'instant avec la Personal Team (compte gratuit) ; suffisant en local.
 - Favicons / aperçus riches d'URL.
 - Sync iCloud propre à l'app (explicitement hors scope actuel).

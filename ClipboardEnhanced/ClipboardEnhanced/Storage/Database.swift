@@ -116,7 +116,9 @@ final class Statement {
     @discardableResult
     func bind(_ index: Int32, _ value: Data?) -> Statement {
         if let value {
-            value.withUnsafeBytes { buffer in
+            // SQLITE_TRANSIENT : SQLite copie les octets, sûr après la fin de la closure.
+            // Code de retour ignoré, comme les autres `bind`.
+            _ = value.withUnsafeBytes { buffer in
                 sqlite3_bind_blob(stmt, index, buffer.baseAddress, Int32(buffer.count), SQLITE_TRANSIENT)
             }
         } else {

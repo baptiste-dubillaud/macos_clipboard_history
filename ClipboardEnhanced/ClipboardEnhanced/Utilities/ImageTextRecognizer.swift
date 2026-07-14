@@ -10,7 +10,8 @@ import Vision
 
 enum ImageTextRecognizer {
     /// Longueur max du texte extrait conservé (label + recherche).
-    private static let maxLength = 500
+    // `nonisolated` : lue depuis `recognizeText`, elle-même nonisolated.
+    private nonisolated static let maxLength = 500
 
     /// Extrait le texte d'une image PNG. Fonction pure, appelable hors du thread
     /// principal (l'OCR peut prendre 100–300 ms). Retourne "" si aucun texte.
